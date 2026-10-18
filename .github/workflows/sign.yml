@@ -1,0 +1,121 @@
+name: Sign Feather
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  FEATHER_URL: https://github.com/claration/feather/releases/download/v2.9.0/Feather.ipa
+  FEATHER_SHA256: 833c57d3c4bf4b4a9fe408be72e1c720cbb949f736a00286750f50e7915730ea
+  FEATHER_VERSION: 2.9.0
+  BUNDLE_ID: nl.spijkerman.feather
+  ZSIGN_TAG: v1.1.2
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Build zsign
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q git g++ pkg-config libssl-dev
+          git clone --depth 1 --branch "$ZSIGN_TAG" https://github.com/zhlynn/zsign.git
+          make -C zsign/build/linux
+          ZSIGN=$(find "$PWD/zsign" -type f -name zsign -perm -u+x | head -n1)
+          test -n "$ZSIGN"
+          echo "ZSIGN=$ZSIGN" >> "$GITHUB_ENV"
+
+      - name: Sign Feather
+        env:
+          P12_BASE64: ${{ secrets.P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$PROFILE_BASE64" | base64 -d > "$RUNNER_TEMP/profile.mobileprovision"
+          curl -fsSL -o Feather.ipa "$FEATHER_URL"
+          echo "$FEATHER_SHA256  Feather.ipa" | sha256sum -c -
+          mkdir -p site
+          "$ZSIGN" -k "$RUNNER_TEMP/cert.p12" -p "$P12_PASSWORD" \
+            -m "$RUNNER_TEMP/profile.mobileprovision" -b "$BUNDLE_ID" \
+            -o site/Feather.ipa Feather.ipa
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/profile.mobileprovision"
+          unzip -l site/Feather.ipa | grep -E 'embedded.mobileprovision|_CodeSignature/CodeResources' | head -n 4
+
+      - name: Write install page
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          set -euo pipefail
+          cat > site/manifest.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>items</key>
+            <array>
+              <dict>
+                <key>assets</key>
+                <array>
+                  <dict>
+                    <key>kind</key><string>software-package</string>
+                    <key>url</key><string>${BASE_URL}/Feather.ipa</string>
+                  </dict>
+                </array>
+                <key>metadata</key>
+                <dict>
+                  <key>bundle-identifier</key><string>${BUNDLE_ID}</string>
+                  <key>bundle-version</key><string>${FEATHER_VERSION}</string>
+                  <key>kind</key><string>software</string>
+                  <key>title</key><string>Feather</string>
+                </dict>
+              </dict>
+            </array>
+          </dict>
+          </plist>
+          EOF
+          cat > site/index.html <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Install Feather</title>
+          <style>
+            body { font: 18px -apple-system, system-ui, sans-serif; margin: 0; padding: 48px 16px; text-align: center; background: #fff; color: #111; }
+            a { display: inline-block; margin-top: 24px; padding: 14px 28px; border-radius: 12px; background: #0a84ff; color: #fff; text-decoration: none; font-weight: 600; }
+            p { color: #555; }
+          </style>
+          </head>
+          <body>
+          <h1>Feather ${FEATHER_VERSION}</h1>
+          <p>Open this page in Safari on the iPhone.</p>
+          <a href="itms-services://?action=download-manifest&amp;url=${BASE_URL}/manifest.plist">Install Feather</a>
+          </body>
+          </html>
+          EOF
+          head -n 3 site/manifest.plist
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5
